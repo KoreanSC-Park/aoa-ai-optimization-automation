@@ -6,12 +6,19 @@ AOA is a local-first optimization workflow prototype. This first runnable slice 
 
 Use Python 3.11–3.13, Node.js 20.19+ or 22.12+, and npm. Run the backend and frontend in separate PowerShell terminals. Check installed Python versions with `py -0p`; the commands below use the launcher's default Python 3. If that default is outside 3.11–3.13, select an installed supported version with `py -3.11`, `py -3.12`, or `py -3.13` instead.
 
+From a PowerShell terminal, clone this implementation branch (the default `main` branch is still the starter scaffold), then enter the checkout:
+
+```powershell
+git clone --branch feat/mock-optimization-mvp --single-branch https://github.com/KoreanSC-Park/aoa-ai-optimization-automation.git
+cd aoa-ai-optimization-automation
+```
+
 Terminal 1, from the repository root:
 
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-\.venv\Scripts\python.exe --version
+.\.venv\Scripts\python.exe --version
 $env:AOA_DATA_DIR = "$env:LOCALAPPDATA\AOA"
 .\.venv\Scripts\aoa.exe serve --host 127.0.0.1 --port 8000
 ```
@@ -30,7 +37,7 @@ Open the local URL printed by Vite, usually `http://localhost:5173`. The sample 
 
 Choose a numeric CSV or OpenFOAM `.dat` file in **Use existing solver results**. Preview and map columns as design inputs, output metrics, or ignore; choose a safe objective expression; then import and analyze. Input parameters and solver metrics remain distinct. Imported rows can be checked against the same numeric constraints used for optimization.
 
-The OpenFOAM support is intentionally narrow: a headered ASCII table beginning with `# Time` followed by a row of column names, then finite numeric whitespace/tab-separated rows. This covers common `postProcessing/.../forceCoeffs.dat` output with headers such as `# Time Cm Cd Cl Cl(f) Cl(r)`; punctuation in names is normalized (`Cl(f)` becomes `Cl_f`). For that time-series format, choose the last row or mean across time. CSV keeps each row as an evaluation. Imports are limited to 2 MB of text and 100,000 rows.
+The OpenFOAM support is intentionally narrow: a header line containing `# Time` followed by column names on the same line (for example, `# Time Cm Cd Cl Cl(f) Cl(r)`), then finite numeric whitespace/tab-separated rows. This covers common `postProcessing/.../forceCoeffs.dat` output; punctuation in names is normalized (`Cl(f)` becomes `Cl_f`). For that time-series format, choose the last row or mean across time. CSV keeps each row as an evaluation. Imports are limited to 2 MB of text and 100,000 rows.
 
 OpenFOAM function objects write requested text/field data under the case's `postProcessing` directory, and `forceCoeffs` documents a `.dat` output. OpenFOAM output varies with function object and version, so this importer does not claim to support arbitrary output files. It does not read mesh fields, vector/tensor files, binary data, VTK, or launch OpenFOAM. See the official [function-object guide](https://doc.openfoam.com/2306/tools/post-processing/function-objects/) and [forceCoeffs output/API reference](https://api.openfoam.com/2306/forceCoeffs_8H_source.html).
 
