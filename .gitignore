@@ -3,6 +3,7 @@
 *.egg-info/
 .venv/
 venv/
+.aoa/
 .env
 .env.*
 !.env.example
