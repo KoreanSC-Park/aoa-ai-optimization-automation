@@ -9,8 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Query, Response, status
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from aoa.engine import run_workflow
 from aoa.importing import DatasetImportRequest, DatasetPreviewRequest, import_table, preview_table
@@ -35,6 +37,13 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
     )
     app.state.repository = repository
     app.state.executor = executor
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(_request: Request, error: RequestValidationError) -> JSONResponse:
+        # Nonfinite request values cannot be echoed in a JSON error response.
+        details = [{key: item[key] for key in ("type", "loc", "msg")} for item in error.errors()]
+        return JSONResponse(status_code=422, content={"detail": details})
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -123,7 +132,12 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
 
     @app.post("/api/v1/workflows/validate")
     def validate_workflow(workflow: WorkflowConfig) -> dict[str, Any]:
-        return {"valid": True, "schema_version": workflow.schema_version, "node_count": 6}
+        return {
+            "valid": True,
+            "schema_version": workflow.schema_version,
+            "node_count": len(workflow.graph.nodes),
+            "workflow": workflow.model_dump(mode="json"),
+        }
 
     @app.post("/api/v1/runs", status_code=status.HTTP_202_ACCEPTED)
     def create_run(

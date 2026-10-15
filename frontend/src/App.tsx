@@ -11,30 +11,13 @@ import {
   useEdgesState,
   useNodesState,
   type Connection,
-  type Edge,
   type Node,
   type NodeProps,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import './App.css'
+import { canvasFromWorkflow, connectionError, defaultWorkflow, initialEdges, initialNodes, parseWorkflowDocument, snapshotWorkflow, type Constraint, type FlowNodeData, type Variable, type Workflow } from './workflow'
 
-type Variable = { name: string; lower: number; upper: number }
-type Constraint = { name: string; expression: string; relation: '<=' | '>='; bound: number }
-type Workflow = {
-  schema_version: 1
-  name: string
-  variables: Variable[]
-  doe: { method: 'lhs' | 'random'; samples: number; seed: number }
-  solver: { kind: 'sphere' | 'rosenbrock' | 'branin'; retry_attempts: number }
-  objective: { name: string; expression: string; direction: 'minimize' | 'maximize' }
-  constraints: Constraint[]
-  optimizer: { engine: 'optuna_tpe'; trials: number; seed: number }
-  graph: {
-    nodes: { id: string; type: string }[]
-    edges: { source: string; target: string; source_handle: string; target_handle: string }[]
-  }
-}
-type FlowNodeData = { title: string; meta: string; color: string; inputHandle?: string; outputHandle?: string; active?: boolean; [key: string]: unknown }
 type ApiEvaluation = {
   evaluation_id: string
   sequence: number
@@ -91,53 +74,6 @@ type ImportedDataset = {
 }
 type DatasetHistory = { dataset_id: string; filename: string; source_format: string; row_count: number; created_at: string }
 
-const defaultWorkflow: Workflow = {
-  schema_version: 1,
-  name: 'Sphere benchmark',
-  variables: [
-    { name: 'x', lower: -5, upper: 5 },
-    { name: 'y', lower: -5, upper: 5 },
-  ],
-  doe: { method: 'lhs', samples: 20, seed: 42 },
-  solver: { kind: 'sphere', retry_attempts: 1 },
-  objective: { name: 'objective', expression: 'sphere', direction: 'minimize' },
-  constraints: [],
-  optimizer: { engine: 'optuna_tpe', trials: 50, seed: 43 },
-  graph: {
-    nodes: [
-      { id: 'variables', type: 'design_variables' }, { id: 'doe', type: 'doe' },
-      { id: 'solver', type: 'mock_solver' }, { id: 'objective', type: 'objective' },
-      { id: 'optimizer', type: 'optuna_optimizer' }, { id: 'results', type: 'results' },
-    ],
-    edges: [
-      { source: 'variables', target: 'doe', source_handle: 'design_space', target_handle: 'design_space' },
-      { source: 'doe', target: 'solver', source_handle: 'candidate_batch', target_handle: 'candidate' },
-      { source: 'solver', target: 'objective', source_handle: 'solver_result', target_handle: 'solver_result' },
-      { source: 'objective', target: 'optimizer', source_handle: 'objective_vector', target_handle: 'evaluation_result' },
-      { source: 'optimizer', target: 'results', source_handle: 'run_summary', target_handle: 'run_summary' },
-    ],
-  },
-}
-
-const initialNodes: Node<FlowNodeData>[] = [
-  { id: 'variables', type: 'workflow', position: { x: 48, y: 142 }, data: { title: 'Design variables', meta: '2 continuous · bounded', color: 'mint', outputHandle: 'design_space' } },
-  { id: 'doe', type: 'workflow', position: { x: 286, y: 142 }, data: { title: 'Design of experiments', meta: 'LHS · 20 samples', color: 'blue', inputHandle: 'design_space', outputHandle: 'candidate_batch' } },
-  { id: 'solver', type: 'workflow', position: { x: 524, y: 142 }, data: { title: 'Mock solver', meta: 'Sphere benchmark', color: 'violet', inputHandle: 'candidate', outputHandle: 'solver_result' } },
-  { id: 'objective', type: 'workflow', position: { x: 762, y: 142 }, data: { title: 'Objective + constraints', meta: 'Minimize sphere', color: 'amber', inputHandle: 'solver_result', outputHandle: 'objective_vector' } },
-  { id: 'optimizer', type: 'workflow', position: { x: 1000, y: 142 }, data: { title: 'Optuna TPE', meta: '50 adaptive trials', color: 'pink', inputHandle: 'evaluation_result', outputHandle: 'run_summary' } },
-  { id: 'results', type: 'workflow', position: { x: 1238, y: 142 }, data: { title: 'Results', meta: 'History · CSV export', color: 'green', inputHandle: 'run_summary' } },
-]
-
-const initialEdges: Edge[] = initialNodes.slice(0, -1).map((node, index) => ({
-  id: `e${index + 1}`,
-  source: node.id,
-  target: initialNodes[index + 1].id,
-  sourceHandle: node.data.outputHandle,
-  targetHandle: initialNodes[index + 1].data.inputHandle,
-  animated: false,
-  style: { stroke: '#566277', strokeWidth: 1.5 },
-}))
-
 function WorkflowNode({ data, selected }: NodeProps<Node<FlowNodeData>>) {
   return (
     <div className={`workflow-node ${data.color} ${selected ? 'selected' : ''}`}>
@@ -189,7 +125,10 @@ function App() {
   const [datasetHistory, setDatasetHistory] = useState<DatasetHistory[]>([])
   const [events, setEvents] = useState<RunEvent[]>([])
   const [error, setError] = useState('')
-  const [saved, setSaved] = useState(false)
+  const [savedSource, setSavedSource] = useState('')
+  const [documentBusy, setDocumentBusy] = useState(false)
+  const workflowSnapshot = useMemo(() => snapshotWorkflow(workflow, nodes, edges), [workflow, nodes, edges])
+  const saved = savedSource === JSON.stringify(workflowSnapshot)
 
   const nodeConfig = useMemo(() => ({
     variables: `${workflow.variables.length} continuous · bounded`,
@@ -223,34 +162,89 @@ function App() {
   }, [service])
 
   const onConnect = useCallback((connection: Connection) => {
+    const problem = connectionError(connection, nodes, edges)
+    if (problem) {
+      setError(problem)
+      return
+    }
     setEdges((current) => addEdge({ ...connection, style: { stroke: '#7f8da4', strokeWidth: 1.5 } }, current))
     setError('')
-  }, [setEdges])
+  }, [nodes, edges, setEdges])
 
   const updateWorkflow = <K extends keyof Workflow>(key: K, value: Workflow[K]) => {
     setWorkflow((current) => ({ ...current, [key]: value }))
-    setSaved(false)
     setError('')
   }
 
-  const saveWorkflow = () => {
-    localStorage.setItem('aoa-workflow-v1', JSON.stringify({ workflow, nodes, edges }))
-    setSaved(true)
+  const applyWorkflow = (next: Workflow, fromBrowser = false) => {
+    const canvas = canvasFromWorkflow(next)
+    setWorkflow(next)
+    setNodes(canvas.nodes)
+    setEdges(canvas.edges)
+    setSelected('variables')
+    setRun(null)
+    setEvents([])
+    setSavedSource(fromBrowser ? JSON.stringify(snapshotWorkflow(next, canvas.nodes, canvas.edges)) : '')
+    setError('')
   }
 
-  const loadWorkflow = () => {
-    const source = localStorage.getItem('aoa-workflow-v1')
-    if (!source) return
+  const saveWorkflow = async (exportFile = false) => {
+    setDocumentBusy(true)
+    setError('')
     try {
-      const parsed = JSON.parse(source) as { workflow: Workflow; nodes: Node<FlowNodeData>[]; edges: Edge[] }
-      setWorkflow(parsed.workflow)
-      setNodes(parsed.nodes)
-      setEdges(parsed.edges ?? initialEdges)
-      setSaved(true)
-      setError('')
-    } catch {
-      setError('The saved browser workflow could not be read. Start with the sample workflow instead.')
+      const validated = await readJson<{ workflow: Workflow }>('/workflows/validate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(workflowSnapshot),
+      })
+      const source = JSON.stringify(validated.workflow, null, 2)
+      if (exportFile) {
+        const url = URL.createObjectURL(new Blob([source], { type: 'application/json' }))
+        const link = document.createElement('a')
+        link.href = url
+        link.download = 'aoa-workflow.json'
+        link.click()
+        window.setTimeout(() => URL.revokeObjectURL(url), 0)
+      } else {
+        localStorage.setItem('aoa-workflow-v1', source)
+        setSavedSource(JSON.stringify(workflowSnapshot))
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not save this workflow.')
+    } finally {
+      setDocumentBusy(false)
     }
+  }
+
+  const loadWorkflow = async (file?: File) => {
+    setDocumentBusy(true)
+    setError('')
+    try {
+      if (file && file.size > 256_000) throw new Error('Workflow files are limited to 256 KB of JSON.')
+      const source = file ? await file.text() : localStorage.getItem('aoa-workflow-v1')
+      if (!source) throw new Error('No workflow is saved in this browser. Use Import JSON to open a file.')
+      const validated = await readJson<{ workflow: Workflow }>('/workflows/validate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parseWorkflowDocument(source)),
+      })
+      applyWorkflow(validated.workflow, !file)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not load this workflow.')
+    } finally {
+      setDocumentBusy(false)
+    }
+  }
+
+  const selectNode = (nodeId: string) => {
+    setSelected(nodeId)
+    setNodes((current) => current.map((node) => ({ ...node, selected: node.id === nodeId })))
+    const section = nodeId === 'objective' ? 'solver' : nodeId
+    document.getElementById(`settings-${section}`)?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+  }
+
+  const addNode = (template: Node<FlowNodeData>) => {
+    if (!nodes.some((node) => node.id === template.id)) {
+      setNodes((current) => [...current, { ...template, data: { ...template.data } }])
+      setError('')
+    }
+    selectNode(template.id)
   }
 
   const runWorkflow = async () => {
@@ -259,16 +253,7 @@ function App() {
     setRun(null)
     setEvents([])
     try {
-      const graph = {
-        nodes: nodes.map((node) => ({ id: node.id, type: workflow.graph.nodes.find((entry) => entry.id === node.id)?.type ?? '' })),
-        edges: edges.map((edge) => ({
-          source: edge.source,
-          target: edge.target,
-          source_handle: edge.sourceHandle ?? '',
-          target_handle: edge.targetHandle ?? '',
-        })),
-      }
-      const submittedWorkflow = { ...workflow, graph }
+      const submittedWorkflow = workflowSnapshot
       await readJson('/workflows/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -413,8 +398,8 @@ function App() {
   const selectRun = async (runId: string) => {
     try {
       const restored = await readJson<Run>(`/runs/${runId}`)
+      applyWorkflow(restored.workflow)
       setRun(restored)
-      setWorkflow(restored.workflow)
       const eventResult = await readJson<{ events: RunEvent[] }>(`/runs/${runId}/events`)
       setEvents(eventResult.events)
     } catch (caught) {
@@ -424,20 +409,27 @@ function App() {
 
   const currentNode = nodes.find((node) => node.id === selected)
   const inspectorTitle = currentNode?.data.title ?? 'Workflow settings'
+  const resultWorkflow = run?.workflow ?? workflow
 
   return (
     <main className="app-shell">
       <header className="topbar">
         <a className="brand" href="#home"><span className="brand-mark">A</span><span>AOA</span></a>
         <div className="topbar-middle"><span className="workspace-path">WORKSPACE <b>/</b> OPTIMIZATION STUDIO</span><span className={`connection ${service}`}><i />{service === 'online' ? 'Local engine ready' : service === 'offline' ? 'Engine offline' : 'Checking engine'}</span></div>
-        <div className="topbar-actions"><span className="mode-pill">LOCAL · MOCK SOLVER</span><button className="quiet-button" onClick={loadWorkflow}>Load</button><button className={`quiet-button ${saved ? 'saved' : ''}`} onClick={saveWorkflow}>{saved ? 'Saved' : 'Save'}</button></div>
+        <div className="topbar-actions">
+          <span className="mode-pill">LOCAL · MOCK SOLVER</span>
+          <button className="quiet-button" onClick={() => void loadWorkflow()} disabled={busy || documentBusy || service !== 'online'}>Load</button>
+          <button className={`quiet-button ${saved ? 'saved' : ''}`} onClick={() => void saveWorkflow()} disabled={busy || documentBusy || service !== 'online'}>{saved ? 'Saved' : 'Save'}</button>
+          <button className="quiet-button" onClick={() => void saveWorkflow(true)} disabled={busy || documentBusy || service !== 'online'}>Export JSON</button>
+          <label className="file-picker workflow-picker">Import JSON<input aria-label="Import workflow JSON" type="file" accept=".json,application/json" disabled={busy || documentBusy || service !== 'online'} onChange={(event) => { const file = event.target.files?.[0]; if (file) void loadWorkflow(file); event.currentTarget.value = '' }} /></label>
+        </div>
       </header>
 
       <div className="main-layout">
         <section className="studio">
           <div className="page-heading">
             <div><p className="eyebrow">OPTIMIZATION WORKFLOW</p><h1>Design a better outcome.</h1><p className="subtitle">Configure a reproducible experiment, then run it against a deterministic benchmark.</p></div>
-            <div className="heading-actions"><div className="engine-chip"><span className="engine-dot" /> Optuna TPE <small>enabled</small></div><button className="run-button" onClick={runWorkflow} disabled={busy || service !== 'online' || (workflow.solver.kind !== 'sphere' && workflow.variables.length < 2)}><span className={busy ? 'spinner' : 'play'} />{busy ? 'Running workflow…' : 'Run workflow'}</button></div>
+            <div className="heading-actions"><div className="engine-chip"><span className="engine-dot" /> Optuna TPE <small>enabled</small></div><button className="run-button" onClick={runWorkflow} disabled={busy || documentBusy || service !== 'online' || (workflow.solver.kind !== 'sphere' && workflow.variables.length < 2)}><span className={busy ? 'spinner' : 'play'} />{busy ? 'Running workflow…' : 'Run workflow'}</button></div>
           </div>
 
           {error && <div className="error-banner" role="alert"><strong>Needs attention</strong><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss error">×</button></div>}
@@ -445,6 +437,13 @@ function App() {
           <div className="section-heading"><div><h2>Workflow canvas</h2><p>Select a node to edit its settings. Drag to rearrange.</p></div><div className="canvas-legend"><span><i className="legend-port" /> Data flow</span><span><i className="legend-seed" /> Reproducible seed</span></div></div>
 
           <div className="canvas-frame">
+            <div className="node-palette" role="toolbar" aria-label="Workflow node palette">
+              {initialNodes.map((template) => {
+                const exists = nodes.some((node) => node.id === template.id)
+                return <button key={template.id} className={selected === template.id ? 'active' : ''} disabled={busy || documentBusy} aria-label={`${exists ? 'Select' : 'Add'} ${template.data.title} node`} onClick={() => addNode(template)}>{exists ? '' : '+ '}{template.data.title}</button>
+              })}
+              <button disabled={busy || documentBusy} onClick={() => { setEdges(initialEdges.filter((edge) => nodes.some((node) => node.id === edge.source) && nodes.some((node) => node.id === edge.target))); setError('') }}>Restore connections</button>
+            </div>
             <ReactFlow
               nodes={nodes}
               edges={edges}
@@ -452,7 +451,11 @@ function App() {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
-              onNodeClick={(_, node) => setSelected(node.id)}
+              isValidConnection={(connection) => connectionError(connection, nodes, edges) === null}
+              onNodeClick={(_, node) => selectNode(node.id)}
+              nodesDraggable={!busy && !documentBusy}
+              nodesConnectable={!busy && !documentBusy}
+              deleteKeyCode={busy || documentBusy ? null : ['Backspace', 'Delete']}
               fitView
               fitViewOptions={{ padding: 0.18, minZoom: 0.45, maxZoom: 1 }}
               minZoom={0.35}
@@ -463,21 +466,21 @@ function App() {
               <MiniMap pannable zoomable nodeColor={(node) => ({ mint: '#91dab7', blue: '#8bb5ff', violet: '#b2a1ff', amber: '#f1c785', pink: '#efa1c8', green: '#78cfab' }[String(node.data.color)] ?? '#738199')} />
               <Controls showInteractive={false} />
             </ReactFlow>
-            <div className="canvas-footer"><span><b>01</b> / FLOW</span><span>6 NODES <i>·</i> 5 CONNECTIONS <i>·</i> DAG</span></div>
+            <div className="canvas-footer"><span><b>01</b> / FLOW</span><span>{nodes.length} NODES <i>·</i> {edges.length} CONNECTIONS <i>·</i> DAG</span></div>
           </div>
 
-          <section className="results-section">
-            <div className="section-heading results-heading"><div><h2>Run results</h2><p>{run ? `${run.run_id} · ${run.status}` : 'Your evaluations and best candidate will appear here.'}</p></div><div className="results-actions">{runHistory.length > 0 && <select className="history-select" aria-label="Load a previous run" defaultValue="" onChange={(event) => event.target.value && void selectRun(event.target.value)}><option value="">Recent runs</option>{runHistory.map((item) => <option key={item.run_id} value={item.run_id}>{item.name} · {item.run_id.slice(-6)} · {item.status}</option>)}</select>}{run?.status === 'completed' && <a className="export-link" href={`${API}/runs/${run.run_id}/results.csv`} download>↓ Export CSV</a>}</div></div>
+          <section className="results-section" id="settings-results">
+            <div className="section-heading results-heading"><div><h2>Run results</h2><p>{run ? `${run.run_id} · ${run.status}` : 'Your evaluations and best candidate will appear here.'}</p></div><div className="results-actions">{runHistory.length > 0 && <select className="history-select" aria-label="Load a previous run" defaultValue="" disabled={busy || documentBusy} onChange={(event) => event.target.value && void selectRun(event.target.value)}><option value="">Recent runs</option>{runHistory.map((item) => <option key={item.run_id} value={item.run_id}>{item.name} · {item.run_id.slice(-6)} · {item.status}</option>)}</select>}{run?.status === 'completed' && <a className="export-link" href={`${API}/runs/${run.run_id}/results.csv`} download>↓ Export CSV</a>}</div></div>
             {run?.summary && <div className="summary-grid">
               <article className="summary-card summary-best"><span>BEST {run.summary.objective_direction.toUpperCase()}</span><strong>{formatNumber(run.summary.best_objective)}</strong><small>{run.summary.best_feasible ? 'Feasible candidate' : 'No feasible candidate'}</small></article>
               <article className="summary-card"><span>EVALUATIONS</span><strong>{run.summary.evaluation_count}</strong><small>{run.summary.feasible_count} feasible</small></article>
               <article className="summary-card"><span>CACHE REUSE</span><strong>{run.summary.cache_hit_count}</strong><small>solver results reused</small></article>
-              <article className="summary-card summary-parameters"><span>BEST PARAMETERS</span><strong>{Object.entries(run.summary.best_parameters).map(([key, value]) => `${key} ${formatNumber(value)}`).join(' · ')}</strong><small>{workflow.objective.expression}</small></article>
+              <article className="summary-card summary-parameters"><span>BEST PARAMETERS</span><strong>{Object.entries(run.summary.best_parameters).map(([key, value]) => `${key} ${formatNumber(value)}`).join(' · ')}</strong><small>{resultWorkflow.objective.expression}</small></article>
             </div>}
             {run?.evaluations.length ? <div className="results-card">
               <div className="chart-header"><div><strong>Objective history</strong><small>Lower is better when minimizing</small></div><span>DOE <i className="dot-blue" /> OPTUNA <i className="dot-pink" /></span></div>
               <ObjectiveChart evaluations={run.evaluations} />
-              <div className="table-scroll"><table><thead><tr><th>#</th><th>Source</th>{workflow.variables.map((variable) => <th key={variable.name}>{variable.name}</th>)}<th>Objective</th><th>Constraint</th><th>Cache</th></tr></thead><tbody>{run.evaluations.slice(-12).reverse().map((evaluation) => <tr key={evaluation.evaluation_id}><td>{evaluation.sequence.toString().padStart(2, '0')}</td><td><span className={`source-tag ${evaluation.source}`}>{evaluation.source === 'doe' ? 'DOE' : 'TPE'}</span></td>{workflow.variables.map((variable) => <td key={variable.name}>{formatNumber(evaluation.parameters[variable.name])}</td>)}<td className="objective-cell">{formatNumber(evaluation.objective_value)}</td><td><span className={`feasibility ${evaluation.feasible ? 'yes' : 'no'}`}>{evaluation.feasible ? 'Feasible' : 'Outside'}</span></td><td>{evaluation.cache_hit ? 'Reused' : 'New'}</td></tr>)}</tbody></table></div>
+              <div className="table-scroll"><table><thead><tr><th>#</th><th>Source</th>{resultWorkflow.variables.map((variable) => <th key={variable.name}>{variable.name}</th>)}<th>Objective</th><th>Constraint</th><th>Cache</th></tr></thead><tbody>{run.evaluations.slice(-12).reverse().map((evaluation) => <tr key={evaluation.evaluation_id}><td>{evaluation.sequence.toString().padStart(2, '0')}</td><td><span className={`source-tag ${evaluation.source}`}>{evaluation.source === 'doe' ? 'DOE' : 'TPE'}</span></td>{resultWorkflow.variables.map((variable) => <td key={variable.name}>{formatNumber(evaluation.parameters[variable.name])}</td>)}<td className="objective-cell">{formatNumber(evaluation.objective_value)}</td><td><span className={`feasibility ${evaluation.feasible ? 'yes' : 'no'}`}>{evaluation.feasible ? 'Feasible' : 'Outside'}</span></td><td>{evaluation.cache_hit ? 'Reused' : 'New'}</td></tr>)}</tbody></table></div>
               <p className="table-note">Showing the latest 12 of {run.evaluations.length} evaluations.</p>
             </div> : <div className="empty-results"><div className="empty-icon">↗</div><strong>No run yet</strong><p>Start a workflow to see candidate scores, feasibility, and evaluation history.</p></div>}
             {events.length > 0 && <details className="event-panel"><summary>Run event journal <span>{events.length} events</span></summary><div>{events.slice(-8).map((event) => <p key={event.event_id}><code>{event.event_id.toString().padStart(3, '0')}</code><b>{event.type}</b><small>{new Date(event.created_at).toLocaleTimeString()}</small></p>)}</div></details>}
@@ -486,7 +489,7 @@ function App() {
           <section className="import-section">
             <div className="section-heading results-heading"><div><h2>Use existing solver results</h2><p>Import numeric CSV data or OpenFOAM force-coefficient tables. No solver is launched.</p></div>{datasetHistory.length > 0 && <select className="history-select" aria-label="Load an imported dataset" defaultValue="" onChange={(event) => event.target.value && void selectDataset(event.target.value)}><option value="">Imported datasets</option>{datasetHistory.map((dataset) => <option key={dataset.dataset_id} value={dataset.dataset_id}>{dataset.filename} · {dataset.row_count} rows</option>)}</select>}</div>
             <div className="import-card">
-              <div className="import-topline"><div><span className="import-icon">↥</span><div><strong>Bring in existing results</strong><small>Headered numeric CSV or OpenFOAM postProcessing .dat</small></div></div><label className="file-picker">Choose file<input type="file" accept=".csv,.dat,text/csv,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) void previewImport(file); event.currentTarget.value = '' }} /></label></div>
+              <div className="import-topline"><div><span className="import-icon">↥</span><div><strong>Bring in existing results</strong><small>Headered numeric CSV or OpenFOAM postProcessing .dat</small></div></div><label className="file-picker">Choose file<input aria-label="Choose solver result file" type="file" accept=".csv,.dat,text/csv,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) void previewImport(file); event.currentTarget.value = '' }} /></label></div>
               <p className="import-disclosure">Files are parsed locally by AOA and only normalized numeric rows are saved. Inputs and output metrics stay in separate columns.</p>
               {datasetPreview && <>
                 <div className="file-summary"><span><b>{datasetPreview.filename}</b> · {datasetPreview.format === 'openfoam_dat' ? 'OpenFOAM .dat' : 'numeric CSV'} · {datasetPreview.row_count} data rows</span><span>Map columns to inputs or outputs</span></div>
@@ -504,18 +507,19 @@ function App() {
           <div className="inspector-top"><div><p className="eyebrow">NODE INSPECTOR</p><h2>{inspectorTitle}</h2></div><button className="more-button" aria-label="More settings">···</button></div>
           <p className="inspector-help">Set bounds, sample strategy, model, and scoring rules for this experiment.</p>
 
+          <fieldset className="workflow-fields" disabled={busy || documentBusy}>
           <label className="field-label">Workflow name<input value={workflow.name} onChange={(event) => updateWorkflow('name', event.target.value)} maxLength={100} /></label>
 
-          <section className="inspector-group"><div className="group-heading"><div><span className="step-number">01</span><strong>Design variables</strong></div><button className="text-button" onClick={addVariable} disabled={workflow.variables.length >= 8}>+ Add</button></div>
+          <section className="inspector-group" id="settings-variables"><div className="group-heading"><div><span className="step-number">01</span><strong>Design variables</strong></div><button className="text-button" onClick={addVariable} disabled={workflow.variables.length >= 8}>+ Add</button></div>
             <div className="variables-list">{workflow.variables.map((variable, index) => <div className="variable-row" key={`${index}-${variable.name}`}><input aria-label={`Variable ${index + 1} name`} className="variable-name" value={variable.name} onChange={(event) => setVariable(index, 'name', event.target.value)} /><label><small>MIN</small><input aria-label={`${variable.name} minimum`} type="number" step="any" value={variable.lower} onChange={(event) => setVariable(index, 'lower', event.target.value)} /></label><span className="range-arrow">→</span><label><small>MAX</small><input aria-label={`${variable.name} maximum`} type="number" step="any" value={variable.upper} onChange={(event) => setVariable(index, 'upper', event.target.value)} /></label>{workflow.variables.length > 1 && <button className="remove-button" onClick={() => updateWorkflow('variables', workflow.variables.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${variable.name}`}>×</button>}</div>)}</div>
           </section>
 
-          <section className="inspector-group"><div className="group-heading"><div><span className="step-number">02</span><strong>Design of experiments</strong></div><span className="mini-tag">DOE</span></div>
+          <section className="inspector-group" id="settings-doe"><div className="group-heading"><div><span className="step-number">02</span><strong>Design of experiments</strong></div><span className="mini-tag">DOE</span></div>
             <div className="two-col-fields"><label className="field-label">Sampling<select value={workflow.doe.method} onChange={(event) => updateWorkflow('doe', { ...workflow.doe, method: event.target.value as Workflow['doe']['method'] })}><option value="lhs">Latin hypercube</option><option value="random">Random</option></select></label><label className="field-label">Samples<input type="number" min="0" max="500" value={workflow.doe.samples} onChange={(event) => updateWorkflow('doe', { ...workflow.doe, samples: Number(event.target.value) })} /></label></div>
             <label className="field-label seed-field">Random seed<input type="number" min="0" value={workflow.doe.seed} onChange={(event) => updateWorkflow('doe', { ...workflow.doe, seed: Number(event.target.value) })} /><small>Same seed reproduces the design.</small></label>
           </section>
 
-          <section className="inspector-group"><div className="group-heading"><div><span className="step-number">03</span><strong>Solver + score</strong></div></div>
+          <section className="inspector-group" id="settings-solver"><div className="group-heading"><div><span className="step-number">03</span><strong>Solver + score</strong></div></div>
             <label className="field-label">Mock benchmark<select value={workflow.solver.kind} onChange={(event) => { const kind = event.target.value as Workflow['solver']['kind']; updateWorkflow('solver', { ...workflow.solver, kind }); updateWorkflow('objective', { ...workflow.objective, expression: kind }) }}><option value="sphere">Sphere · smooth bowl</option><option value="rosenbrock">Rosenbrock · narrow valley</option><option value="branin">Branin · multimodal</option></select></label>
             {workflow.solver.kind !== 'sphere' && workflow.variables.length < 2 && <p className="field-hint">This benchmark requires at least two design variables. Add a variable to enable Run workflow, or select Sphere.</p>}
             <label className="field-label retry-field">Retry on transient solver startup<input type="number" min="1" max="3" value={workflow.solver.retry_attempts} onChange={(event) => updateWorkflow('solver', { ...workflow.solver, retry_attempts: Number(event.target.value) })} /><small>Bounded to 1–3 attempts. Mock runs do not simulate solver failures.</small></label>
@@ -525,12 +529,13 @@ function App() {
             {workflow.constraints.map((constraint, index) => <div className="constraint-row" key={index}><input aria-label="Constraint name" value={constraint.name} onChange={(event) => updateConstraint(index, 'name', event.target.value)} /><input aria-label="Constraint expression" value={constraint.expression} onChange={(event) => updateConstraint(index, 'expression', event.target.value)} /><select aria-label="Constraint relation" value={constraint.relation} onChange={(event) => updateConstraint(index, 'relation', event.target.value)}><option value="<=">≤</option><option value=">=">≥</option></select><input aria-label="Constraint bound" type="number" step="any" value={constraint.bound} onChange={(event) => updateConstraint(index, 'bound', event.target.value)} /><button className="remove-button" onClick={() => updateWorkflow('constraints', workflow.constraints.filter((_, itemIndex) => itemIndex !== index))} aria-label="Remove constraint">×</button></div>)}
           </section>
 
-          <section className="inspector-group"><div className="group-heading"><div><span className="step-number">04</span><strong>Optimizer</strong></div><span className="mini-tag implemented">IMPLEMENTED</span></div>
+          <section className="inspector-group" id="settings-optimizer"><div className="group-heading"><div><span className="step-number">04</span><strong>Optimizer</strong></div><span className="mini-tag implemented">IMPLEMENTED</span></div>
             <label className="field-label">Strategy<select value={workflow.optimizer.engine} disabled><option value="optuna_tpe">Optuna TPE · adaptive</option></select></label>
             <div className="two-col-fields"><label className="field-label">Trials<input type="number" min="0" max="500" value={workflow.optimizer.trials} onChange={(event) => updateWorkflow('optimizer', { ...workflow.optimizer, trials: Number(event.target.value) })} /></label><label className="field-label">TPE seed<input type="number" min="0" value={workflow.optimizer.seed} onChange={(event) => updateWorkflow('optimizer', { ...workflow.optimizer, seed: Number(event.target.value) })} /></label></div>
             <p className="future-engines"><span>Next adapters</span> BoTorch GP-BO <i>·</i> pymoo NSGA-II</p>
           </section>
 
+          </fieldset>
           <div className="fluent-note"><div className="fluent-icon">F</div><div><strong>Live Fluent · not configured</strong><p>Requires a locally verified Fluent/PyFluent version and a valid commercial license. This workflow uses the no-license mock solver.</p></div></div>
           <div className="inspector-footer"><span>WORKFLOW SCHEMA <b>v1</b></span><span>API <b>v1</b></span></div>
         </aside>

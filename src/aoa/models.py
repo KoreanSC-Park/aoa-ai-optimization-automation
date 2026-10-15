@@ -73,9 +73,18 @@ class OptimizerConfig(StrictModel):
     seed: int = Field(default=43, ge=0, le=2**32 - 1)
 
 
+class NodePosition(StrictModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    x: float
+    y: float
+
+
 class GraphNode(StrictModel):
     id: Literal["variables", "doe", "solver", "objective", "optimizer", "results"]
     type: Literal["design_variables", "doe", "mock_solver", "objective", "optuna_optimizer", "results"]
+    version: Literal[1] = 1
+    position: NodePosition | None = None
 
 
 class GraphEdge(StrictModel):
