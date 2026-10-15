@@ -9,7 +9,7 @@ Use Python 3.11–3.13, Node.js 20.19+ or 22.12+, and npm. Run the backend and f
 From a PowerShell terminal, clone this implementation branch (the default `main` branch is still the starter scaffold), then enter the checkout:
 
 ```powershell
-git clone --branch feat/mock-optimization-mvp --single-branch https://github.com/KoreanSC-Park/aoa-ai-optimization-automation.git
+git clone --branch feat/p0-workflow-editor --single-branch https://github.com/KoreanSC-Park/aoa-ai-optimization-automation.git
 cd aoa-ai-optimization-automation
 ```
 
@@ -32,6 +32,16 @@ npm run dev
 ```
 
 Open the local URL printed by Vite, usually `http://localhost:5173`. The sample workflow starts with a 20-point Latin-hypercube DOE followed by 50 Optuna TPE trials on the Sphere benchmark. Click **Run workflow**; results and a CSV export appear below the canvas.
+
+## Edit and save a workflow
+
+Use the node palette above the canvas to select a node and jump to its settings. Select a canvas node and press Delete/Backspace to remove it; its palette button then adds it back. **Restore connections** recreates the supported links between nodes currently on the canvas. This release executes the fixed six-node pipeline; missing nodes/links must be restored before saving or running.
+
+**Save** keeps one validated workflow in this browser, and **Load** restores it. **Export JSON** downloads `aoa-workflow.json`; **Import JSON** opens that file on another browser/PC. The JSON contains schema/node versions, all experiment settings, typed connections and node positions. File imports are limited to 256 KB and validated by the local engine before replacing the editor. An invalid file or browser storage failure produces an error and preserves current work. Older MVP browser saves and older run snapshots remain readable. Saving/loading documents requires the local engine to be running.
+
+Run history restores the configuration and layout captured when the run started. Changing the current editor does not change the columns/formula shown for an existing run.
+
+See [implementation status and next steps](docs/IMPLEMENTATION_STATUS.md) for the original P0–P5 plan compared with current functionality.
 
 ## Import existing results
 
